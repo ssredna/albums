@@ -1,0 +1,149 @@
+:root {
+  --h: 260px;
+  --gutter: 40px;
+  --turn: 0.55s;
+  --ease: cubic-bezier(0.25, 0.8, 0.25, 1);
+
+  --bg: #efe9df;
+  --text: #221e18;
+  --muted: #7b7266;
+  --line: #d6cdbf;
+  --focus: #c2410c;
+  --accent: #1db954;
+  --error: #b42318;
+
+  --board-top: #a5825f;
+  --board-face: #7d5c3f;
+  --board-shadow: rgb(60 40 20 / 0.22);
+
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15130f;
+    --text: #ede7dc;
+    --muted: #8f8577;
+    --line: #3a342b;
+    --focus: #f59e0b;
+    --error: #f97066;
+
+    --board-top: #4a3827;
+    --board-face: #2f2419;
+    --board-shadow: rgb(0 0 0 / 0.45);
+  }
+}
+
+@media (max-width: 640px) {
+  :root {
+    --h: 190px;
+    --gutter: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --turn: 0s;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 70vh;
+  padding: 0 var(--gutter);
+  text-align: center;
+}
+
+.center h1 {
+  margin: 0;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+
+.center p {
+  margin: 0 0 12px;
+}
+
+button.primary {
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 0;
+  border-radius: 999px;
+  padding: 12px 28px;
+  cursor: pointer;
+}
+
+button.primary:hover {
+  filter: brightness(1.08);
+}
+
+button.link {
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button.link:hover {
+  color: var(--text);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.error {
+  color: var(--error);
+  max-width: 42ch;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 0.875rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.15);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
