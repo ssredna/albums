@@ -74,7 +74,7 @@
   </main>
 {:else if albums}
   <Rack {albums} onsignout={signOut} />
-  <Player />
+  <Player {albums} />
   {#if error}<p class="error toast" role="alert">{error}</p>{/if}
 {:else}
   <main class="center">

@@ -179,7 +179,7 @@
   }
 
   .rack {
-    padding: 40px 0 160px; /* room for the player dock */
+    padding: 40px 0 380px; /* room to scroll the last shelf clear of the turntable */
   }
 
   .measure {

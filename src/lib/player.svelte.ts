@@ -4,8 +4,16 @@
 import { getAccessToken, hasAllScopes, login } from './auth';
 import { ApiError, request, type Album } from './spotify';
 
-type Disc = { id: string; cover: string };
-type Track = { name: string; artists: string; album: string; albumId: string; image: string };
+type Disc = { id: string; cover: string; trackIds: string[] };
+type Track = {
+  /** Both the played id and, if Spotify relinked it to a regional version, the original id. */
+  ids: string[];
+  name: string;
+  artists: string;
+  album: string;
+  albumId: string;
+  image: string;
+};
 export type Flight = { album: Album; from: DOMRect };
 
 export const player = $state({
@@ -13,8 +21,10 @@ export const player = $state({
   disc: null as Disc | null,
   /** A disc on its way from the shelf to the player. */
   flight: null as Flight | null,
-  /** Album we've asked Spotify to play but whose first track hasn't been reported yet. */
+  /** Album on its way to playing (flying, being cued, or starting) until Spotify reports its first track. */
   pending: null as Album | null,
+  /** The record has landed and the arm is swinging onto it; playback starts once it's there. */
+  cueing: false,
   track: null as Track | null,
   paused: true,
   /** False when playback has moved to another device (phone, desktop app, …). */
@@ -28,12 +38,19 @@ export const player = $state({
   error: null as string | null,
 });
 
+/** How long the tonearm takes to swing onto the record. */
+export const ARM_MS = 800;
 const READY_TIMEOUT_MS = 15_000;
+const PENDING_TIMEOUT_MS = 5000;
+const SYNC_MS = 1000;
 
 let sdk: Spotify.Player | undefined;
 let connecting: Promise<void> | undefined;
 let device: string | null = null;
 let waiters: { resolve: (id: string) => void; reject: (err: Error) => void }[] = [];
+/** When the play request for the pending album went out (Infinity until it has). */
+let pendingSince = Infinity;
+let syncTimer: ReturnType<typeof setInterval> | undefined;
 
 function loadSdk(): Promise<void> {
   if (window.Spotify) return Promise.resolve();
@@ -74,6 +91,14 @@ async function connect() {
   sdk.addListener('playback_error', ({ message }) => (player.error = message));
 
   if (!(await sdk.connect())) fail('Could not connect to Spotify.', false);
+
+  // State events from the SDK are occasionally missed; poll its local state as a safety net.
+  syncTimer = setInterval(sync, SYNC_MS);
+}
+
+async function sync() {
+  if (!sdk || !device) return;
+  onState(await sdk.getCurrentState());
 }
 
 function deviceId(): Promise<string> {
@@ -105,11 +130,19 @@ function onState(state: Spotify.PlaybackState | null) {
   }
   const current = state.track_window.current_track;
   const albumId = current.album.uri.split(':').pop() ?? '';
+  const ids = [current.id, current.linked_from?.id].filter((id): id is string => !!id);
   const image = [...current.album.images].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url ?? '';
+  const onAlbum = (album: { id: string; trackIds: string[] }) =>
+    album.id === albumId || ids.some((id) => album.trackIds.includes(id));
 
-  // Ignore stale updates about the previous album while the new one is starting.
-  if (player.pending && player.pending.id !== albumId) return;
+  // While a new album is starting, ignore stale updates about the previous one, and the new one's
+  // loading/paused updates before sound actually starts (they'd stop the platter for a moment).
+  // Matched on track ids too, since Spotify may report a relinked (regional) album id. Gives up
+  // waiting after a few seconds.
+  const started = player.pending && onAlbum(player.pending) && !state.paused && !state.loading;
+  if (player.pending && !started && performance.now() - pendingSince < PENDING_TIMEOUT_MS) return;
   player.pending = null;
+  player.cueing = false;
 
   player.active = true;
   player.paused = state.paused;
@@ -117,6 +150,7 @@ function onState(state: Spotify.PlaybackState | null) {
   player.duration = state.duration;
   player.updatedAt = performance.now();
   player.track = {
+    ids,
     name: current.name,
     artists: current.artists.map((a) => a.name).join(', '),
     album: current.album.name,
@@ -124,16 +158,19 @@ function onState(state: Spotify.PlaybackState | null) {
     image,
   };
   // Playback moved on to another album (autoplay, or changed from another device): swap the disc.
-  if (player.disc && player.disc.id !== albumId && !player.flight) player.disc = { id: albumId, cover: image };
+  if (player.disc && !onAlbum(player.disc) && !player.flight) player.disc = { id: albumId, cover: image, trackIds: [] };
 }
 
 async function startPlayback(albumId: string, retried = false): Promise<void> {
   const id = await deviceId();
   try {
+    // A record plays from the first track, in order: start at track 1 explicitly, since Spotify may
+    // remember shuffle for an album and otherwise pick a random opener.
     await request(`/me/player/play?device_id=${id}`, {
       method: 'PUT',
-      body: JSON.stringify({ context_uri: `spotify:album:${albumId}` }),
+      body: JSON.stringify({ context_uri: `spotify:album:${albumId}`, offset: { position: 0 } }),
     });
+    await request(`/me/player/shuffle?state=false&device_id=${id}`, { method: 'PUT' }).catch(() => {});
   } catch (err) {
     // A freshly connected device can take a moment before the Web API knows about it.
     if (err instanceof ApiError && err.status === 404 && !retried) {
@@ -156,23 +193,48 @@ export function playAlbum(album: Album, from: DOMRect) {
   }
   sdk?.activateElement(); // must run inside the click for autoplay rules (Safari/iOS)
 
+  // Lifting the needle: stop whatever is playing while the new record comes over.
+  if (player.active && !player.paused) {
+    player.paused = true;
+    sdk?.pause();
+  }
+
   player.error = null;
   player.pending = album;
+  pendingSince = Infinity;
   player.flight = { album, from };
-  startPlayback(album.id).catch((err) => {
-    player.pending = null;
-    player.error = err instanceof Error ? err.message : 'Playback failed.';
-  });
+  deviceId().catch(() => {}); // connect while the record is in the air
 }
 
+/** The record is on the platter: swing the arm over, and start playing once the needle is down. */
 export function landed(flight: Flight) {
-  player.disc = { id: flight.album.id, cover: flight.album.cover };
+  const { album } = flight;
+  player.disc = { id: album.id, cover: album.cover, trackIds: album.trackIds };
   player.flight = null;
+  player.cueing = true;
+
+  setTimeout(() => {
+    if (player.pending?.id !== album.id) return; // another record was picked meanwhile
+    pendingSince = performance.now();
+    startPlayback(album.id).catch((err) => {
+      player.pending = null;
+      player.cueing = false;
+      player.error = err instanceof Error ? err.message : 'Playback failed.';
+    });
+  }, ARM_MS);
 }
 
 export async function toggle() {
-  if (!sdk) return;
-  if (player.active) return sdk.togglePlay();
+  if (!sdk || player.pending) return; // a record is on its way; it starts by itself
+  if (player.active) {
+    // Show it immediately; the SDK confirms shortly after.
+    const now = performance.now();
+    if (!player.paused) player.position += now - player.updatedAt; // freeze where it was
+    player.updatedAt = now;
+    player.paused = !player.paused;
+    await sdk.togglePlay();
+    return sync();
+  }
   // Take playback back from whichever device has it.
   const id = await deviceId();
   await request('/me/player', { method: 'PUT', body: JSON.stringify({ device_ids: [id], play: true }) }).catch(
@@ -182,12 +244,21 @@ export async function toggle() {
 
 export const next = () => sdk?.nextTrack();
 export const previous = () => sdk?.previousTrack();
-export const seek = (ms: number) => sdk?.seek(ms);
 
 export function disconnect() {
+  clearInterval(syncTimer);
   sdk?.disconnect();
   sdk = undefined;
   connecting = undefined;
   device = null;
-  Object.assign(player, { disc: null, flight: null, pending: null, track: null, paused: true, active: false, error: null });
+  Object.assign(player, {
+    disc: null,
+    flight: null,
+    pending: null,
+    cueing: false,
+    track: null,
+    paused: true,
+    active: false,
+    error: null,
+  });
 }

@@ -9,6 +9,9 @@ export type Album = {
   year: string;
   addedAt: string;
   tracks: number;
+  /** Track ids and durations in album order, for placing the tonearm across the whole record. */
+  trackIds: string[];
+  durations: number[];
   cover: string;
   thumb: string;
   url: string;
@@ -24,6 +27,7 @@ type SavedAlbumsPage = {
       name: string;
       release_date: string;
       total_tracks: number;
+      tracks: { items: { id: string; duration_ms: number }[] };
       images: Image[];
       artists: { name: string }[];
       external_urls: { spotify: string };
@@ -92,6 +96,8 @@ function toAlbum({ added_at, album }: SavedAlbumsPage['items'][number]): Album {
     year: album.release_date.slice(0, 4),
     addedAt: added_at,
     tracks: album.total_tracks,
+    trackIds: album.tracks.items.map((t) => t.id),
+    durations: album.tracks.items.map((t) => t.duration_ms),
     cover: images[0]?.url ?? '',
     thumb: images.at(-1)?.url ?? '',
     url: album.external_urls.spotify,

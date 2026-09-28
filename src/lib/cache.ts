@@ -1,9 +1,10 @@
 import type { Album } from './spotify';
 
-const KEY = 'albums:v1';
+const KEY = 'albums:v2';
 
 export function loadAlbums(): Album[] | null {
   try {
+    localStorage.removeItem('albums:v1'); // pre-tracklist cache
     const raw = localStorage.getItem(KEY);
     return raw ? (JSON.parse(raw) as Album[]) : null;
   } catch {

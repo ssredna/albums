@@ -1,6 +1,6 @@
 # Album Rack
 
-Your saved Spotify albums as spines on a shelf. Click a spine to pull the record out, press play and the CD flies into the player and plays right in the browser.
+Your saved Spotify albums as spines on a shelf. Click a spine to pull the record out, press play and the record flies onto the turntable and plays right in the browser.
 
 Static Svelte + Vite app. Sign-in uses Spotify's PKCE flow in the browser, so there is no backend and no client secret.
 
@@ -36,4 +36,4 @@ Development Mode allows up to 5 users. Anyone besides the owner must be added un
 - `src/lib/player.svelte.ts`: Web Playback SDK wrapper; starts albums on the in-browser device
 - `src/lib/color.ts`: samples each cover's dominant colour for its spine (cached)
 - `src/components/Rack.svelte`, `Spine.svelte`: the shelf
-- `src/components/Player.svelte`, `Disc.svelte`: the dock, the spinning CD and the flight to it
+- `src/components/Player.svelte`, `Vinyl.svelte`: the turntable, the spinning record and its flight from the shelf
