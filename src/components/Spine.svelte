@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import type { Album } from '../lib/spotify';
+  import { canHover } from '../lib/hover';
+  import { preloadCover } from '../lib/covers';
   import { cachedColor, placeholderColor, spineColor, type SpineColor } from '../lib/color';
 
   let {
@@ -21,7 +23,8 @@
     onplay: (from: DOMRect) => void;
   } = $props();
 
-  const TURN_MS = 550;
+  // Matches --turn in app.css.
+  const turnMs = () => (canHover.current ? 300 : 550);
 
   let slot: HTMLDivElement;
   let cover = $state<HTMLDivElement>();
@@ -34,7 +37,6 @@
   // returning: rotating back; drops to flat when done.
   let phase = $state<'flat' | 'setup' | 'turned' | 'returning'>('flat');
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let preloaded = false;
 
   onMount(() => {
     if (!cachedColor(album.id) && album.thumb) spineColor(album.id, album.thumb).then((c) => (sampled = c));
@@ -54,20 +56,17 @@
       void slot.offsetWidth; // commit the setup pose before animating away from it
     }
     phase = 'turned';
-    setTimeout(() => slot.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), TURN_MS);
+    // Under a mouse the record is already in view; scrolling would pull the shelf from under it.
+    if (!canHover.current) setTimeout(() => slot.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), turnMs());
   }
 
   function putBack() {
     if (phase === 'flat' || phase === 'returning') return;
     phase = 'returning';
-    timer = setTimeout(() => (phase = 'flat'), TURN_MS);
+    timer = setTimeout(() => (phase = 'flat'), turnMs());
   }
 
-  function preload() {
-    if (preloaded) return;
-    preloaded = true;
-    new Image().src = album.cover;
-  }
+  const preload = () => preloadCover(album.cover);
 </script>
 
 <div
@@ -97,7 +96,7 @@
 
       {#if phase !== 'flat'}
         <div class="cover" bind:this={cover}>
-          <img src={album.cover} alt="" />
+          <img src={album.cover} alt="" decoding="async" />
           <button class="put-back" onclick={ontoggle} aria-label="Put {album.name} back"></button>
           <span class="caption">
             <strong>{album.name}</strong>

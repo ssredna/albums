@@ -45,6 +45,13 @@
   }
 }
 
+/* With a mouse, covers flip as you sweep across a shelf, so they need to turn quicker. */
+@media (hover: hover) and (pointer: fine) {
+  :root {
+    --turn: 0.3s;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --turn: 0s;
