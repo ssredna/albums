@@ -2,6 +2,8 @@
 
 Your saved Spotify albums as spines on a shelf. Click a spine to pull the record out, press play and the record flies onto the turntable and plays right in the browser.
 
+The shelves are yours to arrange: add, label and reorder them, and drag albums onto them out of a crate, where everything still to be sorted waits in alphabetical order. The layout is saved in the browser.
+
 Static Svelte + Vite app. Sign-in uses Spotify's PKCE flow in the browser, so there is no backend and no client secret.
 
 ## Setup
@@ -35,5 +37,7 @@ Development Mode allows up to 5 users. Anyone besides the owner must be added un
 - `src/lib/cache.ts`: caches the album list so the rack appears instantly, then refreshes in the background
 - `src/lib/player.svelte.ts`: Web Playback SDK wrapper; starts albums on the in-browser device
 - `src/lib/color.ts`: samples each cover's dominant colour for its spine (cached)
-- `src/components/Rack.svelte`, `Spine.svelte`: the shelf
+- `src/lib/sort.ts`: record-store alphabetical order (so "The Beatles" files under B)
+- `src/components/Rack.svelte`, `Spine.svelte`: the shelves, their layout, and dragging records and shelves about
+- `src/components/Crate.svelte`: the crate of records still to sort, and flipping through it
 - `src/components/Player.svelte`, `Vinyl.svelte`: the turntable, the spinning record and its flight from the shelf

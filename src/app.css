@@ -12,8 +12,11 @@
   --accent: #1db954;
   --error: #b42318;
 
+  --board: 26px;
   --board-top: #a5825f;
   --board-face: #7d5c3f;
+  --board-edge: #6a4c33;
+  --crate-w: 360px;
   --board-shadow: rgb(60 40 20 / 0.22);
 
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -34,6 +37,7 @@
 
     --board-top: #4a3827;
     --board-face: #2f2419;
+    --board-edge: #261d14;
     --board-shadow: rgb(0 0 0 / 0.45);
   }
 }
@@ -144,6 +148,48 @@ button:focus-visible {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.15);
+}
+
+/* A little brass plate with engraved lettering, screwed on at both ends. */
+.brass {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 13px;
+  border-radius: 2px;
+  font: 600 10px/1 Cinzel, Georgia, serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: #3d2a0a;
+  text-shadow: 0 1px 0 rgb(255 245 205 / 0.55);
+  background: linear-gradient(#f6e3a6, #d8b45e 42%, #b98d36 58%, #e3c477);
+  box-shadow:
+    inset 0 0 0 1px rgb(110 76 18 / 0.6),
+    inset 0 1px 0 1px rgb(255 248 220 / 0.45),
+    0 1px 2px rgb(0 0 0 / 0.45);
+}
+
+.brass::before,
+.brass::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #fff4c8, #8a6420 75%);
+  box-shadow: 0 0 0 0.5px rgb(80 55 10 / 0.6);
+}
+
+.brass::before {
+  left: 4px;
+}
+
+.brass::after {
+  right: 4px;
 }
 
 .visually-hidden {

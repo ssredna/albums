@@ -10,6 +10,7 @@
     width,
     side,
     open,
+    dragging = false,
     ontoggle,
     onplay,
   }: {
@@ -18,6 +19,7 @@
     /** Which way the cover swings out — towards the roomier half of the shelf. */
     side: 'left' | 'right';
     open: boolean;
+    dragging?: boolean;
     ontoggle: () => void;
     /** Called with the cover's position, so the disc can fly from it to the player. */
     onplay: (from: DOMRect) => void;
@@ -75,7 +77,9 @@
   class:three={phase !== 'flat'}
   class:anim={phase === 'turned' || phase === 'returning'}
   class:turned={phase === 'turned'}
+  class:dragging
   role="listitem"
+  data-id={album.id}
   style:--w="{width}px"
   style:--spine-bg={color.bg}
   style:--spine-fg={color.fg}
@@ -126,6 +130,23 @@
 
   .slot.three {
     z-index: 1;
+  }
+
+  .slot {
+    -webkit-touch-callout: none; /* a long press picks the record up instead */
+  }
+
+  .slot.dragging {
+    z-index: 10;
+  }
+
+  .dragging .spine {
+    cursor: grabbing;
+    box-shadow: 0 14px 28px -8px rgb(0 0 0 / 0.5);
+  }
+
+  .dragging .lift {
+    transform: translateY(-10px) rotate(-2deg);
   }
 
   /* Hover lift lives on its own element so it never interferes with the 3D turn. */
