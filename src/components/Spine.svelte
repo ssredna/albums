@@ -11,6 +11,7 @@
     side,
     open,
     dragging = false,
+    selected = false,
     ontoggle,
     onplay,
   }: {
@@ -20,6 +21,8 @@
     side: 'left' | 'right';
     open: boolean;
     dragging?: boolean;
+    /** Picked out with others, to be moved together. */
+    selected?: boolean;
     ontoggle: () => void;
     /** Called with the cover's position, so the disc can fly from it to the player. */
     onplay: (from: DOMRect) => void;
@@ -78,6 +81,7 @@
   class:anim={phase === 'turned' || phase === 'returning'}
   class:turned={phase === 'turned'}
   class:dragging
+  class:selected
   role="listitem"
   data-id={album.id}
   style:--w="{width}px"
@@ -161,6 +165,15 @@
   .slot:focus-within .lift,
   .three .lift {
     transform: translateY(-10px);
+  }
+
+  /* Selected records stand a little prouder of the shelf than the rest, ringed. */
+  .selected:not(.three) .lift {
+    transform: translateY(-16px);
+  }
+
+  .selected:not(.three) .spine {
+    box-shadow: inset 0 0 0 2px var(--focus);
   }
 
   .box {

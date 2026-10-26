@@ -2,7 +2,7 @@
 
 Your saved Spotify albums as spines on a shelf. Click a spine to pull the record out, press play and the record flies onto the turntable and plays right in the browser.
 
-The shelves are yours to arrange: add, label and reorder them, and drag albums onto them out of a crate, where everything still to be sorted waits in alphabetical order. The layout is saved in the browser.
+The shelves are yours to arrange: add, label and reorder them, and drag albums onto them out of a crate, where everything still to be sorted waits in alphabetical order. Shelves stand in racks: the arrows at the sides of the window step between them (or add a new one), and a map of them all at the top jumps straight to one. Hold a record or a whole shelf over an arrow or a rack on the map to carry it there. Cmd/Ctrl-click or Shift-click records to select several, and drag one to move them all. The layout is saved in the browser.
 
 Static Svelte + Vite app. Sign-in uses Spotify's PKCE flow in the browser, so there is no backend and no client secret.
 

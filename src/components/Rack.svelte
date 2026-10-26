@@ -4,9 +4,13 @@
   import { playAlbum } from '../lib/player.svelte';
   import { canHover } from '../lib/hover';
   import { preloadCover } from '../lib/covers';
+  import { cachedColor, placeholderColor, spineColor, type SpineColor } from '../lib/color';
+  import { SvelteMap } from 'svelte/reactivity';
   import { byArtist } from '../lib/sort';
   import Crate, { UNPACK_MS, SLIDE_EASING } from './Crate.svelte';
   import { tick } from 'svelte';
+  import { fly } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
 
   let { albums, onsignout }: { albums: Album[]; onsignout: () => void } = $props();
 
@@ -14,20 +18,51 @@
   // put there. Everything not on a shelf waits in the crate, alphabetical, to be sorted. (In the code
   // below, a `Section` is one of those shelves and a `Shelf` the board it stands on. A crowded section
   // squeezes its records together, and only carries on over a second board when they won't fit even
-  // then, as can happen when the window narrows.)
+  // then, as can happen when the window narrows.) There can be several racks side by side, shown one
+  // at a time and stepped between with the arrows at the sides.
   type Section = { id: string; label: string; albums: string[] };
+  type RackLayout = { id: string; sections: Section[] };
 
-  const LAYOUT_KEY = 'rack:layout';
+  const RACKS_KEY = 'rack:racks';
+  const HERE_KEY = 'rack:here';
   const emptyShelf = (): Section => ({ id: crypto.randomUUID(), label: '', albums: [] });
-  // A new rack is one empty shelf, with every album in the crate.
-  let layout = $state.raw<Section[]>(readLayout() ?? [emptyShelf()]);
+  // A new rack is one empty shelf.
+  const emptyRack = (): RackLayout => ({ id: crypto.randomUUID(), sections: [emptyShelf()] });
+  const blank = (r: RackLayout) => r.sections.every((s) => !s.label && !s.albums.length);
+  // A new listener starts with one empty rack, and every album in the crate.
+  let racks = $state.raw<RackLayout[]>(readRacks());
+  let here = $state(readHere());
   let openId = $state<string | null>(null);
+  // Which way the rack last turned, so the next one slides in from that side.
+  let turned = $state(1);
+
+  const layout = $derived(racks[here].sections);
+
+  function readRacks(): RackLayout[] {
+    try {
+      const saved = JSON.parse(localStorage.getItem(RACKS_KEY) ?? 'null');
+      if (Array.isArray(saved) && saved.length) return saved;
+      // From when there was only the one rack.
+      const sections = readLayout();
+      localStorage.removeItem('rack:layout');
+      if (sections) return [{ id: crypto.randomUUID(), sections }];
+    } catch {}
+    return [emptyRack()];
+  }
+
+  function readHere() {
+    try {
+      const saved = Number(localStorage.getItem(HERE_KEY));
+      if (Number.isInteger(saved)) return Math.min(Math.max(saved, 0), racks.length - 1);
+    } catch {}
+    return 0;
+  }
 
   function readLayout(): Section[] | null {
     try {
       localStorage.removeItem('rack:sort'); // from when the rack could only be sorted
       localStorage.removeItem('rack:shelves'); // from when a shelf could run over several boards
-      const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? 'null');
+      const saved = JSON.parse(localStorage.getItem('rack:layout') ?? 'null');
       if (Array.isArray(saved) && saved.length) return saved;
       // From before the crate: unlabelled shelves were records still waiting to be sorted, so
       // they're tipped into the crate and only the labelled ones are kept.
@@ -43,7 +78,8 @@
 
   $effect(() => {
     try {
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+      localStorage.setItem(RACKS_KEY, JSON.stringify(racks));
+      localStorage.setItem(HERE_KEY, String(here));
     } catch {}
   });
 
@@ -57,56 +93,152 @@
   const where = $derived(
     new Map(sections.flatMap((s, shelf) => s.albums.map((a, index) => [a.id, { shelf, index }] as const))),
   );
+  // On a shelf of any rack.
+  const shelved = $derived(new Set(racks.flatMap((r) => r.sections.flatMap((s) => s.albums))));
   // Including albums saved since the rack was last arranged.
-  const crate = $derived(albums.filter((a) => !where.has(a.id)).sort(byArtist));
+  const crate = $derived(albums.filter((a) => !shelved.has(a.id)).sort(byArtist));
 
   // Every change starts from the rack as shown, so missing albums are let go.
   const current = (): Section[] => sections.map((s) => ({ ...s, albums: s.albums.map((a) => a.id) }));
 
-  // Moves an album (from a shelf or the crate) onto shelf `shelf`, before the album at `to` there
-  // (or at its end).
-  function moveAlbum(id: string, shelf: number, to: number) {
-    const next = current();
-    const from = where.get(id);
-    if (from) next[from.shelf].albums.splice(from.index, 1);
-    next[shelf].albums.splice(from?.shelf === shelf && to > from.index ? to - 1 : to, 0, id);
-    layout = next;
+  function commit(next: Section[]) {
+    racks = racks.map((r, i) => (i === here ? { ...r, sections: next } : r));
   }
 
-  // Puts an album back in the crate.
-  function unsort(id: string) {
-    const from = where.get(id);
-    if (!from) return;
+  const without = (sections: Section[], ids: Set<string>) =>
+    sections.map((s) => (s.albums.some((a) => ids.has(a)) ? { ...s, albums: s.albums.filter((a) => !ids.has(a)) } : s));
+
+  // Moves albums (from shelves of this rack or others, or the crate) onto shelf `shelf`, in the
+  // order given, before the album at `to` there (or at its end).
+  function moveAlbums(ids: string[], shelf: number, to: number) {
+    const moving = new Set(ids);
     const next = current();
-    next[from.shelf].albums.splice(from.index, 1);
-    layout = next;
+    const before = next[shelf].albums.slice(to).find((id) => !moving.has(id));
+    const stay = without(next, moving);
+    const landing = stay[shelf].albums;
+    landing.splice(before ? landing.indexOf(before) : landing.length, 0, ...ids);
+    racks = racks.map((r, i) => ({ ...r, sections: i === here ? stay : without(r.sections, moving) }));
   }
+
+  const moveAlbum = (id: string, shelf: number, to: number) => moveAlbums([id], shelf, to);
+
+  // Puts albums back in the crate, from whichever racks they're on.
+  function unsort(ids: string[]) {
+    const going = new Set(ids);
+    racks = racks.map((r) => ({ ...r, sections: without(r.sections, going) }));
+  }
+
+  // Moves shelf `id` over from another rack, to sit before the shelf at `to` here (or at the bottom).
+  // A rack left with no shelves is taken down.
+  function carryShelf(id: string, to: number) {
+    const origin = racks.findIndex((r) => r.sections.some((s) => s.id === id));
+    if (origin < 0 || origin === here) return;
+    const section = racks[origin].sections.find((s) => s.id === id)!;
+    // It takes the place of a new rack's empty shelf.
+    const next = blank(racks[here]) ? [] : current();
+    next.splice(to, 0, section);
+    const left = racks[origin].sections.filter((s) => s.id !== id);
+    racks = racks
+      .map((r, i) => (i === here ? { ...r, sections: next } : i === origin ? { ...r, sections: left } : r))
+      .filter((r) => r.sections.length);
+    if (!left.length && origin < here) here--;
+  }
+
+  // Records picked out with Cmd/Ctrl-click (one at a time) or Shift-click (a run along the rack),
+  // to be dragged, or put back in the crate, all together. While any are picked out, records stay
+  // shut, and a plain click picks one out or puts it back too.
+  let selected = $state.raw(new Set<string>());
+  let anchor: string | null = null;
+
+  function select(e: MouseEvent) {
+    const id = (e.target as Element).closest<HTMLElement>('.slot')?.dataset.id;
+    if (!id || !(e.metaKey || e.ctrlKey || e.shiftKey || selected.size)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    putEverythingBack();
+    const next = new Set(selected);
+    const order = sections.flatMap((s) => s.albums.map((a) => a.id));
+    const from = anchor ? order.indexOf(anchor) : -1;
+    if (e.shiftKey && from >= 0) {
+      const to = order.indexOf(id);
+      for (const a of order.slice(Math.min(from, to), Math.max(from, to) + 1)) next.add(a);
+    } else if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    anchor = id;
+    selected = next;
+  }
+
+  const saved = $derived(new Set(albums.map((a) => a.id)));
+
+  // Spine colours for the map, sampled for records on racks not looked at yet too.
+  const sampled = new SvelteMap<string, SpineColor>();
+  const asked = new Set<string>();
+  const colorOf = (id: string) => (sampled.get(id) ?? cachedColor(id) ?? placeholderColor(id)).bg;
+
+  $effect(() => {
+    for (const { id, thumb } of albums) {
+      if (!shelved.has(id) || !thumb || asked.has(id) || cachedColor(id)) continue;
+      asked.add(id);
+      spineColor(id, thumb).then((color) => sampled.set(id, color));
+    }
+  });
+
+  // The selection in rack order, leaving out any albums no longer saved.
+  const picked = () =>
+    racks.flatMap((r) => r.sections.flatMap((s) => s.albums)).filter((id) => selected.has(id) && saved.has(id));
+
+  function deselect() {
+    selected = new Set();
+    anchor = null;
+  }
+
+  // Goes to rack `to`. Just past the last there's room for a new one, and a rack left with nothing
+  // on it is taken down.
+  function go(to: number) {
+    if (to === here || to < 0 || to > racks.length || (to === racks.length && blank(racks[here]))) return;
+    putEverythingBack();
+    turned = Math.sign(to - here);
+    let next = to === racks.length ? [...racks, emptyRack()] : racks;
+    if (blank(racks[here])) {
+      next = next.filter((_, i) => i !== here);
+      if (to > here) to--;
+    }
+    racks = next;
+    here = to;
+  }
+
+  const turn = (step: number) => go(here + step);
 
   async function addShelf(at: number) {
     const next = current();
     const id = crypto.randomUUID();
     next.splice(at, 0, { ...emptyShelf(), id });
-    layout = next;
+    commit(next);
     await tick();
     rack?.querySelector<HTMLInputElement>(`[data-section="${id}"] .label`)?.focus();
   }
 
-  // A removed shelf's albums go back in the crate.
+  // A removed shelf's albums go back in the crate. Removing a rack's last shelf takes the rack down.
   function removeShelf(i: number) {
     const next = current();
     const [gone] = next.splice(i, 1);
-    if (!next.length) return;
+    if (!next.length && racks.length === 1) return;
     const count = gone.albums.length;
     const name = gone.label ? `“${gone.label}”` : 'this shelf';
     const them = count === 1 ? 'Its album goes' : `Its ${count} albums go`;
     if (count && !confirm(`Remove ${name}? ${them} back in the crate.`)) return;
-    layout = next;
+    if (next.length) return commit(next);
+    racks = racks.filter((_, r) => r !== here);
+    here = Math.max(here - 1, 0);
   }
 
   function renameShelf(i: number, label: string) {
     const next = current();
     next[i].label = label.trim();
-    layout = next;
+    commit(next);
   }
 
   // Moves shelf `from` so it sits before the shelf at `to` (or at the bottom).
@@ -114,7 +246,7 @@
     const next = current();
     const [section] = next.splice(from, 1);
     next.splice(to > from ? to - 1 : to, 0, section);
-    layout = next;
+    commit(next);
   }
 
   // Shelves are packed once for the current width, so pulling a record out only nudges its own
@@ -280,7 +412,9 @@
   }
 
   function hoverShelf(shelf: Shelf, e: PointerEvent & { currentTarget: HTMLElement }) {
-    if (!hover || draggingId || e.pointerType !== 'mouse') return;
+    // Records stay shut while several are being picked out.
+    const picking = e.metaKey || e.ctrlKey || e.shiftKey || selected.size;
+    if (!hover || draggingId || e.pointerType !== 'mouse' || picking) return;
     clearTimeout(leaveTimer);
     const row = e.currentTarget;
     const x = e.clientX;
@@ -366,9 +500,17 @@
   let draggingId = $state<string | null>(null);
   let liftedShelf = $state<string | null>(null);
   let marker = $state<{ left: number; top: number; width: number; height: number } | null>(null);
-  let ghost = $state<{ album: Album; x: number; y: number } | null>(null);
+  let ghost = $state<{ albums: Album[]; x: number; y: number } | null>(null);
+  // A shelf carried to another rack, where its own board can't follow.
+  let shelfGhost = $state<{ label: string; count: number; x: number; y: number } | null>(null);
   let dropzone = $state<HTMLElement>();
   let receiving = $state(false);
+  // Holding a record or shelf over one of the arrows turns to the next rack, and on to the one after for as
+  // long as it's held there.
+  const TURN_DELAY = 600;
+  // What a held record or shelf is over: an arrow ('-1' or '1'), or a rack on the map (its id).
+  let aiming = $state<string | null>(null);
+  let aimTimer: ReturnType<typeof setTimeout> | undefined;
 
   // The crate starts open for a new rack, when there's nothing on the shelves yet.
   const CRATE_KEY = 'rack:crate-open';
@@ -380,7 +522,7 @@
       const saved = localStorage.getItem(CRATE_KEY);
       if (saved) return saved === 'true';
     } catch {}
-    return layout.every((s) => !s.albums.length);
+    return !shelved.size;
   }
 
   $effect(() => {
@@ -392,6 +534,8 @@
   const CRATE = -1; // where a record is headed when it's dropped back in the crate
   let held: {
     id: string;
+    // Everything being carried: the selection, when the record picked up is part of it.
+    ids: string[];
     el: HTMLElement;
     // Picked out of the crate: a stand-in follows the pointer, as the crate's own card can't leave it.
     crate: boolean;
@@ -410,13 +554,14 @@
     to: number | null;
   } | null = null;
   let heldShelf: {
+    id: string;
     el: HTMLElement;
-    from: number;
     pointerId: number;
     mouse: boolean;
     startX: number;
     startY: number;
     startScroll: number;
+    x: number;
     y: number;
     to: number | null;
   } | null = null;
@@ -432,8 +577,10 @@
     const mouse = e.pointerType === 'mouse';
     if (mouse) e.preventDefault(); // no text selection
     const { clientX: x, clientY: y } = e;
+    const id = el.dataset.id;
     held = {
-      id: el.dataset.id,
+      id,
+      ids: selected.has(id) && selected.size > 1 ? picked() : [id],
       el,
       crate: !!el.closest('[data-crate]'),
       pointerId: e.pointerId,
@@ -454,9 +601,10 @@
 
   function lift() {
     if (!held) return;
-    const { el, id, startX, startY } = held;
-    if (held.crate) {
-      ghost = { album: crate.find((a) => a.id === id)!, x: startX, y: startY };
+    const { el, id, ids, startX, startY } = held;
+    if (held.crate || ids.length > 1) {
+      ghost = { albums: carrying(), x: startX, y: startY };
+      if (ids.length > 1) gather();
     } else {
       const rect = el.getBoundingClientRect();
       const closed = parseFloat(el.style.getPropertyValue('--w'));
@@ -471,18 +619,25 @@
     follow();
   }
 
+  // The held records, the one under the pointer first, for the stand-in.
+  function carrying() {
+    const { id, ids } = held!;
+    return [id, ...ids.filter((i) => i !== id)].flatMap((i) => albums.find((a) => a.id === i) ?? []);
+  }
+
   function pickUpShelf(e: PointerEvent & { currentTarget: HTMLElement }, from: number) {
     if (held || heldShelf || e.button !== 0 || (e.target as Element).closest('input, button')) return;
     const mouse = e.pointerType === 'mouse';
     if (mouse) e.preventDefault();
     heldShelf = {
+      id: sections[from].id,
       el: e.currentTarget.closest<HTMLElement>('.section')!,
-      from,
       pointerId: e.pointerId,
       mouse,
       startX: e.clientX,
       startY: e.clientY,
       startScroll: scrollY,
+      x: e.clientX,
       y: e.clientY,
       to: null,
     };
@@ -492,7 +647,7 @@
   function liftShelf() {
     if (!heldShelf) return;
     putEverythingBack();
-    liftedShelf = sections[heldShelf.from].id;
+    liftedShelf = heldShelf.id;
     if (!heldShelf.mouse) navigator.vibrate?.(10);
     scrollFrame = requestAnimationFrame(autoScroll);
     followShelf();
@@ -506,6 +661,7 @@
 
   function drag(e: PointerEvent) {
     if (heldShelf && e.pointerId === heldShelf.pointerId) {
+      heldShelf.x = e.clientX;
       heldShelf.y = e.clientY;
       if (!liftedShelf) {
         const moved = Math.hypot(e.clientX - heldShelf.startX, heldShelf.y - heldShelf.startY);
@@ -530,14 +686,16 @@
 
   function drop(e: PointerEvent) {
     if (heldShelf && e.pointerId === heldShelf.pointerId) {
-      const { from, to } = heldShelf;
+      const { id, to } = heldShelf;
+      const from = sections.findIndex((s) => s.id === id);
       const moved = liftedShelf && to !== null;
       release();
-      if (moved) moveShelf(from, to);
+      if (moved && from >= 0) moveShelf(from, to);
+      else if (moved) carryShelf(id, to);
       return;
     }
     if (!held || e.pointerId !== held.pointerId) return;
-    const { id, shelf, to } = held;
+    const { ids, shelf, to } = held;
     if (draggingId) {
       // The click that ends a drag shouldn't open or put back the record under the pointer.
       swallowClick = true;
@@ -545,13 +703,66 @@
     }
     const moved = draggingId && to !== null;
     release();
-    if (moved && shelf === CRATE) unsort(id);
-    else if (moved) moveAlbum(id, shelf, to);
+    if (moved && shelf === CRATE) {
+      unsort(ids);
+      // Back in the crate, they're no longer picked out.
+      selected = new Set([...selected].filter((id) => !ids.includes(id)));
+    } else if (moved) moveAlbums(ids, shelf, to);
+  }
+
+  // Picked up together, the selected records fly from their places on the shelf to the pointer,
+  // one hard on the heels of the next, and only stack up once they're all there.
+  const GATHER_MS = 200;
+  const STAGGER_MS = 12;
+  const GATHER_MAX = 40; // records that fly; any more just join the stack
+  let flights = $state.raw<{ album: Album; color: string; from: DOMRect; delay: number }[]>([]);
+  let gathered = $state(0);
+  let gatherFrame = 0;
+
+  function gather() {
+    if (still.matches) return;
+    const list = carrying()
+      .slice(0, GATHER_MAX)
+      .flatMap((album) => {
+        const slot = rack?.querySelector<HTMLElement>(`.slot[data-id="${CSS.escape(album.id)}"]`);
+        const spine = slot?.querySelector('.spine');
+        if (!slot || !spine) return [];
+        return [{ album, color: slot.style.getPropertyValue('--spine-bg'), from: spine.getBoundingClientRect() }];
+      });
+    const stagger = Math.min(STAGGER_MS, 120 / list.length);
+    const total = GATHER_MS + (list.length - 1) * stagger;
+    flights = list.map((flight, i) => ({ ...flight, delay: i * stagger }));
+    gathered = 0;
+    const start = performance.now();
+    const frame = (now: number) => {
+      gathered = now - start;
+      if (gathered < total) gatherFrame = requestAnimationFrame(frame);
+      else flights = [];
+    };
+    gatherFrame = requestAnimationFrame(frame);
+  }
+
+  // Where a flying record is `t` of the way (eased) from its spine to its place in the stack.
+  function flight(from: DOMRect, place: number, delay: number, to: { x: number; y: number }) {
+    const t = 1 - (1 - Math.min(Math.max((gathered - delay) / GATHER_MS, 0), 1)) ** 3;
+    const at = (a: number, b: number) => a + (b - a) * t;
+    const offset = Math.min(place, 2) * 6;
+    return {
+      t,
+      left: at(from.left, to.x - 36 + offset),
+      top: at(from.top, to.y - 36 - offset),
+      width: at(from.width, 72),
+      height: at(from.height, 72),
+      rotate: at(0, -4 + Math.min(place, 2) * 4),
+    };
   }
 
   function release() {
     clearTimeout(pressTimer);
+    aim(null);
     cancelAnimationFrame(scrollFrame);
+    cancelAnimationFrame(gatherFrame);
+    flights = [];
     if (held) held.el.style.transform = '';
     if (heldShelf) heldShelf.el.style.transform = '';
     held = null;
@@ -560,6 +771,7 @@
     liftedShelf = null;
     marker = null;
     ghost = null;
+    shelfGhost = null;
     receiving = false;
   }
 
@@ -591,13 +803,14 @@
 
     held.to = null;
     marker = null;
-    const from = where.get(held.id);
+    if (aimAt(x, y)) return;
+    const { ids } = held;
+    const from = ids.length === 1 ? where.get(held.id) : undefined;
     // Over the crate, a record from a shelf goes back in; one from the crate just stays put.
-    const box = dropzone?.getBoundingClientRect();
-    const overCrate = !!box && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
-    receiving = overCrate && !!from;
+    const overCrate = over(dropzone, x, y);
+    receiving = overCrate && ids.some((id) => shelved.has(id));
     if (overCrate) {
-      if (from) [held.shelf, held.to] = [CRATE, 0];
+      if (receiving) [held.shelf, held.to] = [CRATE, 0];
       return;
     }
 
@@ -610,7 +823,7 @@
     }
     if (!row) return;
     const shelf = Number(row.dataset.shelf);
-    const slots = [...row.querySelectorAll<HTMLElement>('.slot')].filter((s) => s !== el);
+    const slots = [...row.querySelectorAll<HTMLElement>('.slot')].filter((s) => s !== el && !ids.includes(s.dataset.id!));
     const before = slots.find((s) => {
       const { left, width } = s.getBoundingClientRect();
       return x < left + width / 2;
@@ -631,12 +844,58 @@
     }
   }
 
+  function over(el: HTMLElement | undefined, x: number, y: number) {
+    const box = el?.getBoundingClientRect();
+    return !!box && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+  }
+
+  // Whether the pointer is over one of the arrows, turning the rack if it's held there.
+  function aimAt(x: number, y: number) {
+    const target = [...document.querySelectorAll<HTMLElement>('[data-aim]')].find((el) => over(el, x, y));
+    aim(target?.dataset.aim ?? null);
+    return !!target;
+  }
+
+  function aim(target: string | null) {
+    if (target === aiming) return;
+    clearTimeout(aimTimer);
+    aiming = target;
+    if (target) aimTimer = setTimeout(turnHolding, TURN_DELAY);
+  }
+
+  // The held record's spine (or shelf's board) goes with the rack it's on, so from here on a
+  // stand-in carries it, as for a record out of the crate.
+  function turnHolding() {
+    if (held && !ghost) {
+      held.el.style.transform = '';
+      ghost = { albums: carrying(), x: held.x, y: held.y };
+    } else if (heldShelf && !shelfGhost) {
+      const { id, el, x, y } = heldShelf;
+      const section = sections.find((s) => s.id === id)!;
+      el.style.transform = '';
+      shelfGhost = { label: section.label, count: section.albums.length, x, y };
+    } else if (!held && !heldShelf) return;
+    const step = Number(aiming);
+    if (step) {
+      turn(step);
+      aimTimer = setTimeout(turnHolding, TURN_DELAY);
+    } else {
+      go(racks.findIndex((r) => r.id === aiming));
+    }
+  }
+
   // The shelf slides up and down with the pointer, and the marker runs along the board it'll land
   // under.
   function followShelf() {
     if (!heldShelf || !rack) return;
-    const { el, from, y } = heldShelf;
-    el.style.transform = `translateY(${y - heldShelf.startY + scrollY - heldShelf.startScroll}px)`;
+    const { el, x, y } = heldShelf;
+    if (shelfGhost) shelfGhost = { ...shelfGhost, x, y };
+    else el.style.transform = `translateY(${y - heldShelf.startY + scrollY - heldShelf.startScroll}px)`;
+    heldShelf.to = null;
+    marker = null;
+    if (aimAt(x, y)) return;
+    // Carried from another rack, it isn't among this one's shelves.
+    const from = sections.findIndex((s) => s.id === heldShelf!.id);
     const others = [...rack.querySelectorAll<HTMLElement>('.section')];
     let to = others.findIndex((s, i) => {
       if (i === from) return false;
@@ -644,11 +903,7 @@
       return y < top + height / 2;
     });
     if (to === -1) to = others.length;
-    if (to === from || to === from + 1) {
-      heldShelf.to = null;
-      marker = null;
-      return;
-    }
+    if (from >= 0 && (to === from || to === from + 1)) return;
     heldShelf.to = to;
     const edge = to < others.length ? others[to].getBoundingClientRect().top : others.at(-1)!.getBoundingClientRect().bottom;
     const { left, width } = rack.getBoundingClientRect();
@@ -697,18 +952,25 @@
 
   $effect(() => () => {
     clearTimeout(leaveTimer);
+    clearTimeout(aimTimer);
     stopFinger();
     release();
   });
 
+  const still = matchMedia('(prefers-reduced-motion: reduce)');
+
   function closeOnOutsideClick(e: MouseEvent) {
-    if (openId && !(e.target as Element).closest('.slot')) openId = null;
+    const target = e.target as Element;
+    if (openId && !target.closest('.slot')) openId = null;
+    if (selected.size && !target.closest('.slot, button, input')) deselect();
   }
 
   function onkeydown(e: KeyboardEvent) {
+    if (hover && !held && ['Meta', 'Control', 'Shift'].includes(e.key)) putEverythingBack();
     if (e.key !== 'Escape') return;
     if (held || heldShelf) release();
     else if (openId) openId = null;
+    else if (selected.size) deselect();
     else crateOpen = false;
   }
 </script>
@@ -724,7 +986,40 @@
 
 <header>
   <h1 class="visually-hidden">Albums</h1>
-  <button class="link" onclick={onsignout}>Sign out</button>
+  <!-- A map of the racks side by side, each shelf a board with its records' colours along it.
+       A record or shelf held over one of them goes there. -->
+  {#if racks.length > 1}
+    <nav
+      class="map"
+      class:crate-open={crateOpen}
+      aria-label="Racks"
+      style:--slide="{UNPACK_MS}ms"
+      style:--slide-ease={SLIDE_EASING}
+    >
+      {#each racks as r, i (r.id)}
+        {@const labels = r.sections.map((s) => s.label).filter(Boolean).join(' · ')}
+        <button
+          class="mini"
+          class:here={i === here}
+          class:aimed={aiming === r.id}
+          data-aim={i === here ? undefined : r.id}
+          aria-current={i === here || undefined}
+          aria-label="Rack {i + 1}{labels ? `: ${labels}` : ''}"
+          title={labels || undefined}
+          onclick={() => go(i)}
+        >
+          {#each r.sections as section (section.id)}
+            <span class="mini-shelf">
+              {#each section.albums.filter((id) => saved.has(id)) as id (id)}
+                <span class="mini-spine" style:background={colorOf(id)}></span>
+              {/each}
+            </span>
+          {/each}
+        </button>
+      {/each}
+    </nav>
+  {/if}
+  <button class="link sign-out" onclick={onsignout}>Sign out</button>
 </header>
 
 <!-- The shelf boards run on past the sides of the window, and are cut off there. -->
@@ -754,7 +1049,7 @@
               onkeydown={(e) => (e.key === 'Enter' ? e.currentTarget.blur() : nudgeShelf(e, s))}
             />
           </span>
-          {#if sections.length > 1}
+          {#if sections.length > 1 || racks.length > 1}
             <button class="remove" onclick={() => removeShelf(s)}>Remove shelf</button>
           {/if}
         {/if}
@@ -764,75 +1059,104 @@
     {#if albums.length === 0}
       <main class="center"><p class="muted">No saved albums yet. Save some in Spotify and come back.</p></main>
     {:else}
-      <main class="rack" class:hover bind:this={rack}>
+      <main class="rack" class:hover class:carrying={(ghost?.albums.length ?? 0) > 1} bind:this={rack}>
         <div class="measure" bind:clientWidth={available}></div>
         <div class="measure cover-size" bind:clientWidth={coverSize}></div>
-        {#each sections as section, s (section.id)}
-          <section
-            class="section"
-            class:lifted={liftedShelf === section.id}
-            data-section={section.id}
-            aria-label={section.label || 'Shelf'}
-          >
-            <div class="head">
-              <button class="add" onclick={() => addShelf(s)} title="Add a shelf above this one">+ Add shelf</button>
-            </div>
-            {#if section.albums.length === 0}
-              <div class="shelf">
-                <div class="row empty" data-shelf={s}><span class="muted">Drag albums here</span></div>
-                {@render board(section, s, true)}
-              </div>
-            {/if}
-            {#each rows[s] ?? [] as shelf, i}
-              <div class="shelf">
-                <div class="clip">
-                  <!-- svelte-ignore a11y_no_noninteractive_element_interactions (picking up and nudging records; the spines are the controls) -->
-                  <div
-                    class="row"
-                    class:centered={hover && shelf.room !== null}
-                    class:part={hover && shelf.room === null}
-                    role="list"
-                    data-shelf={s}
-                    style:transform={hover ? undefined : shift(shelf)}
-                    style:--start={hover && shelf.room === null ? `${partStart(shelf, openId)}px` : undefined}
-                    onpointerenter={() => preloadShelf(shelf)}
-                    onpointermove={(e) => hoverShelf(shelf, e)}
-                    onpointerleave={hoverOut}
-                    onpointerdown={pickUp}
-                    onkeydown={nudge}
-                  >
-                    {#each shelf.items as item (item.album.id)}
-                      {@const album = item.album}
-                      <Spine
-                        {album}
-                        width={widthOf(shelf, item, openId)}
-                        side={item.side}
-                        open={openId === album.id}
-                        dragging={draggingId === album.id}
-                        ontoggle={() => toggle(album.id)}
-                        onplay={(from) => {
-                          playAlbum(album, from);
-                          openId = null;
-                          dismissedId = album.id;
-                        }}
-                      />
-                    {/each}
-                  </div>
+        {#key racks[here].id}
+          <div in:fly={{ x: 48 * turned, duration: still.matches ? 0 : 260, easing: cubicOut }}>
+            {#each sections as section, s (section.id)}
+              <section
+                class="section"
+                class:lifted={liftedShelf === section.id}
+                data-section={section.id}
+                aria-label={section.label || 'Shelf'}
+              >
+                <div class="head">
+                  <button class="add" onclick={() => addShelf(s)} title="Add a shelf above this one">+ Add shelf</button>
                 </div>
-                {@render board(section, s, i === 0)}
-              </div>
+                {#if section.albums.length === 0}
+                  <div class="shelf">
+                    <div class="row empty" data-shelf={s}><span class="muted">Drag albums here</span></div>
+                    {@render board(section, s, true)}
+                  </div>
+                {/if}
+                {#each rows[s] ?? [] as shelf, i}
+                  <div class="shelf">
+                    <div class="clip">
+                      <!-- svelte-ignore a11y_no_noninteractive_element_interactions (picking up and nudging records; the spines are the controls) -->
+                      <div
+                        class="row"
+                        class:centered={hover && shelf.room !== null}
+                        class:part={hover && shelf.room === null}
+                        role="list"
+                        data-shelf={s}
+                        style:transform={hover ? undefined : shift(shelf)}
+                        style:--start={hover && shelf.room === null ? `${partStart(shelf, openId)}px` : undefined}
+                        onpointerenter={() => preloadShelf(shelf)}
+                        onpointermove={(e) => hoverShelf(shelf, e)}
+                        onpointerleave={hoverOut}
+                        onpointerdown={pickUp}
+                        onclickcapture={select}
+                        onkeydown={nudge}
+                      >
+                        {#each shelf.items as item (item.album.id)}
+                          {@const album = item.album}
+                          <Spine
+                            {album}
+                            width={widthOf(shelf, item, openId)}
+                            side={item.side}
+                            open={openId === album.id}
+                            dragging={draggingId === album.id}
+                            selected={selected.has(album.id)}
+                            ontoggle={() => toggle(album.id)}
+                            onplay={(from) => {
+                              playAlbum(album, from);
+                              openId = null;
+                              dismissedId = album.id;
+                            }}
+                          />
+                        {/each}
+                      </div>
+                    </div>
+                    {@render board(section, s, i === 0)}
+                  </div>
+                {/each}
+              </section>
             {/each}
-          </section>
-        {/each}
-        {#if sections.length}
-          <div class="tail"><button class="add" onclick={() => addShelf(sections.length)}>+ Add shelf</button></div>
-        {/if}
+            {#if sections.length}
+              <div class="tail"><button class="add" onclick={() => addShelf(sections.length)}>+ Add shelf</button></div>
+            {/if}
+          </div>
+        {/key}
       </main>
     {/if}
   </div>
 </div>
 
-<!-- Outside the sliding rack, so its fixed position is the window's. -->
+<!-- Outside the sliding rack, so their fixed positions are the window's. -->
+{#if albums.length}
+  <nav class="turns" class:crate-open={crateOpen} style:--slide="{UNPACK_MS}ms" style:--slide-ease={SLIDE_EASING}>
+    {#if here > 0}
+      <button class="turn prev" class:aimed={aiming === '-1'} data-aim="-1" onclick={() => turn(-1)} aria-label="Previous rack">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5" /></svg>
+      </button>
+    {/if}
+    {#if here < racks.length - 1 || !blank(racks[here])}
+      {@const last = here === racks.length - 1}
+      <button
+        class="turn next"
+        class:aimed={aiming === '1'}
+        data-aim="1"
+        onclick={() => turn(1)}
+        aria-label={last ? 'New rack' : 'Next rack'}
+        title={last ? 'New rack' : undefined}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d={last ? 'M8 3v10M3 8h10' : 'M6 3l5 5-5 5'} /></svg>
+      </button>
+    {/if}
+  </nav>
+{/if}
+
 {#if marker}
   <div
     class="marker"
@@ -857,9 +1181,46 @@
   />
 {/if}
 
+{#if selected.size}
+  <div class="selection" role="status">
+    <span>{selected.size} selected</span>
+    <span class="muted">Drag one to move them all</span>
+    <button class="link" onclick={() => (unsort([...selected]), deselect())}>Back in crate</button>
+    <button class="link" onclick={deselect}>Clear</button>
+  </div>
+{/if}
+
 {#if ghost}
-  <div class="ghost" style:translate="{ghost.x}px {ghost.y}px" aria-hidden="true">
-    <img src={ghost.album.thumb || ghost.album.cover} alt="" />
+  {#each flights as { album, color, from, delay }, i (album.id)}
+    {@const f = flight(from, i, delay, ghost)}
+    <div
+      class="flyer"
+      style:left="{f.left}px"
+      style:top="{f.top}px"
+      style:width="{f.width}px"
+      style:height="{f.height}px"
+      style:rotate="{f.rotate}deg"
+      style:background={color}
+      style:z-index={39 - i}
+      aria-hidden="true"
+    >
+      <img src={album.thumb || album.cover} alt="" style:opacity={f.t} />
+    </div>
+  {/each}
+  <div class="ghost" class:gathering={flights.length > 0} style:translate="{ghost.x}px {ghost.y}px" aria-hidden="true">
+    {#each ghost.albums.slice(0, 3) as album, i (album.id)}
+      <img src={album.thumb || album.cover} alt="" style:--i={i} />
+    {/each}
+    {#if ghost.albums.length > 1}
+      <span class="count">{ghost.albums.length}</span>
+    {/if}
+  </div>
+{/if}
+
+{#if shelfGhost}
+  <div class="shelf-ghost" style:translate="{shelfGhost.x}px {shelfGhost.y}px" aria-hidden="true">
+    <span class="brass">{shelfGhost.label || 'Shelf'}</span>
+    <span class="count">{shelfGhost.count} {shelfGhost.count === 1 ? 'record' : 'records'}</span>
   </div>
 {/if}
 
@@ -898,19 +1259,262 @@
     box-shadow: 0 14px 28px -8px rgb(0 0 0 / 0.6);
   }
 
+  .ghost.gathering {
+    opacity: 0;
+  }
+
+  /* A selected record on its way from the shelf to the stack under the pointer. */
+  .flyer {
+    position: fixed;
+    pointer-events: none;
+    border-radius: 2px;
+    box-shadow: 0 6px 14px -6px rgb(0 0 0 / 0.5);
+    overflow: hidden;
+  }
+
+  .flyer img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
   .ghost img {
+    position: absolute;
+    inset: 0;
+    z-index: calc(3 - var(--i));
     display: block;
     width: 100%;
     height: 100%;
     object-fit: cover;
     border-radius: 2px;
     background: var(--line);
+    translate: calc(var(--i) * 6px) calc(var(--i) * -6px);
+    rotate: calc(var(--i) * 4deg);
+    box-shadow: 0 2px 6px rgb(0 0 0 / 0.35);
+  }
+
+  .ghost .count {
+    position: absolute;
+    z-index: 4;
+    top: -10px;
+    right: -14px;
+    min-width: 22px;
+    padding: 2px 6px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: center;
+    color: #fff;
+    background: var(--focus);
+    border-radius: 999px;
+    rotate: 4deg;
+  }
+
+  /* A shelf carried to another rack: a short length of its board, with its plate. */
+  .shelf-ghost {
+    position: fixed;
+    z-index: 40;
+    top: 0;
+    left: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: var(--board);
+    margin: calc(var(--board) / -2) 0 0 -40px;
+    padding: 3px 16px 0;
+    pointer-events: none;
+    background: linear-gradient(var(--board-top) 0 3px, var(--board-face) 3px, var(--board-edge));
+    border-radius: 2px;
+    box-shadow: 0 14px 28px -8px rgb(0 0 0 / 0.6);
+    rotate: -2deg;
+  }
+
+  .shelf-ghost .count {
+    font-size: 0.75rem;
+    white-space: nowrap;
+    color: rgb(255 255 255 / 0.75);
+  }
+
+  /* What's selected, and what can be done with it all at once. */
+  .selection {
+    position: fixed;
+    z-index: 12;
+    left: 50%;
+    bottom: 24px;
+    translate: -50% 0;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 16px;
+    font-size: 0.8125rem;
+    white-space: nowrap;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.15);
+  }
+
+  .selection .link {
+    font-size: inherit;
+  }
+
+  /* The selected records left behind while a stand-in carries them. */
+  .rack.carrying :global(.slot.selected) {
+    opacity: 0.35;
   }
 
   header {
-    display: flex;
-    justify-content: flex-end;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: start;
     padding: 28px var(--gutter) 8px;
+  }
+
+  .sign-out {
+    grid-column: 3;
+    justify-self: end;
+  }
+
+  .map {
+    grid-column: 2;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    transition: translate var(--slide) var(--slide-ease);
+  }
+
+  /* Centred in what's left of the window beside the open crate. */
+  @media (min-width: 641px) {
+    .map.crate-open {
+      translate: calc((var(--crate-w) + 24px) / 2) 0;
+    }
+  }
+
+  .mini {
+    all: unset;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 70px;
+    padding: 5px 7px 4px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.7;
+    transition:
+      opacity 0.15s ease,
+      border-color 0.15s ease,
+      scale 0.15s ease;
+  }
+
+  .mini:hover,
+  .mini.here {
+    opacity: 1;
+  }
+
+  .mini.here {
+    border-color: var(--muted);
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+  }
+
+  .mini.aimed {
+    opacity: 1;
+    border-color: var(--focus);
+    scale: 1.1;
+  }
+
+  .mini:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .mini-shelf {
+    display: flex;
+    align-items: flex-end;
+    height: 12px;
+    border-bottom: 2px solid var(--board-top);
+  }
+
+  .mini-spine {
+    flex: 0 1 3px;
+    min-width: 0;
+    height: 9px;
+    box-shadow: inset -0.5px 0 rgb(0 0 0 / 0.35);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .map,
+    .mini {
+      transition: none;
+    }
+  }
+
+  /* Arrows at the sides of the window, to the racks beside this one. */
+  .turn {
+    all: unset;
+    position: fixed;
+    z-index: 12;
+    top: 50%;
+    translate: 0 -50%;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    border: 1px solid var(--line);
+    cursor: pointer;
+    transition:
+      left var(--slide) var(--slide-ease),
+      color 0.15s ease,
+      scale 0.15s ease;
+  }
+
+  .turn svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .turn:hover {
+    color: var(--text);
+  }
+
+  .turn.aimed {
+    color: var(--focus);
+    border-color: var(--focus);
+    scale: 1.15;
+  }
+
+  .turn:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  .prev {
+    left: 2px;
+  }
+
+  .next {
+    right: 2px;
+  }
+
+  /* Beside the open crate rather than under it. */
+  @media (min-width: 641px) {
+    .turns.crate-open .prev {
+      left: calc(var(--crate-w) + 24px + 2px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .turn {
+      transition: none;
+    }
   }
 
   .rack {
